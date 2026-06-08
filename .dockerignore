@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+.env
+.env.*
+!.env.example
+*.local
+.vite
+vite.config.ts.timestamp-*.mjs
+*.log
+.DS_Store
+Thumbs.db
+README.md

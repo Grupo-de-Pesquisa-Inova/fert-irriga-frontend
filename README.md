@@ -65,6 +65,29 @@ src/
 - **Alarmes Operacionais** — alarmes ativos do dispositivo com reconhecimento (ACK).
 - **Histórico (Coleta de Dados)** — histórico paginado das leituras de sensores persistidas no backend.
 
+## Deploy em produção (Dokploy)
+
+O frontend é servido por **nginx**, que entrega o SPA e faz **proxy reverso** de `/api` e `/ws` para o backend. Assim o navegador fala sempre com a mesma origem — **sem CORS** e **sem precisar rebuildar** quando o backend muda de endereço.
+
+### Build da imagem
+
+O [`Dockerfile`](./Dockerfile) faz o build com Bun e serve com nginx. O destino do backend é definido em runtime pela variável:
+
+| Variável | Exemplo | Observação |
+|---|---|---|
+| `BACKEND_URL` | `http://fertirriga-backend:8080` | Nome do serviço do backend na rede interna do Docker |
+
+O nginx resolve o backend de forma *lazy* (via DNS interno do Docker), então o container sobe mesmo que o backend ainda não esteja pronto.
+
+### Passos no Dokploy
+
+1. Crie uma **Application** apontando para este repositório (build via `Dockerfile`).
+2. Defina `BACKEND_URL` com o nome interno do serviço do backend (ex.: `http://fertirriga-backend:8080`). Garanta que frontend e backend estão na **mesma rede** do Docker/Dokploy.
+3. Atribua o **domínio público** (ex.: `app.seu-dominio.com`) — o Traefik do Dokploy cuida do HTTPS automaticamente.
+4. Use `CORS_ORIGIN=https://app.seu-dominio.com` na configuração do backend.
+
+Health check do container: `GET /healthz`.
+
 ## Licença
 
 [MIT](./LICENSE) © Grupo de Pesquisa Inova
