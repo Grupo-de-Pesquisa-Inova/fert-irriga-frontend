@@ -86,16 +86,21 @@ export interface IRecipeStep {
 
 export interface ISchedule {
   id: string;
-  zone_id: string;
+  zone_id: string | null;
   recipe_id: string | null;
+  valve_number: number;
   name: string;
   schedule_type: string;
   cron_expression: string;
   start_at: string | null;
+  start_window_min: number;
+  duration_sec: number;
+  origin: string;
   is_enabled: boolean;
   version: number;
   next_execution_at: string | null;
   created_at: string;
+  updated_at: string;
 }
 
 export interface IScheduleRun {
@@ -221,10 +226,14 @@ export const deleteRecipe = (id: string) =>
 
 // ─── Schedules ─────────────────────────────────────────
 
-export const listSchedules = (zoneId: string) => request<ISchedule[]>(`/schedules?zone_id=${zoneId}`);
+export const listSchedules = () => request<ISchedule[]>("/schedules");
 export const getSchedule = (id: string) => request<ISchedule>(`/schedules/${id}`);
 export const createSchedule = (data: Partial<ISchedule>) =>
   request<ISchedule>("/schedules", { method: "POST", body: JSON.stringify(data) });
+export const updateSchedule = (id: string, data: Partial<ISchedule>) =>
+  request<ISchedule>(`/schedules/${id}`, { method: "PUT", body: JSON.stringify(data) });
+export const deleteSchedule = (id: string) =>
+  request<void>(`/schedules/${id}`, { method: "DELETE" });
 export const enableSchedule = (id: string) =>
   request<void>(`/schedules/${id}/enable`, { method: "POST" });
 export const disableSchedule = (id: string) =>

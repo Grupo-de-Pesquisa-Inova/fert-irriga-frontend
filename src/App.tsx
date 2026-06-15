@@ -19,9 +19,21 @@ import {
   CheckCircle,
   ChevronLeft,
   ChevronRight,
+  LayoutDashboard,
+  Cpu,
+  Menu,
+  Waves,
+  Leaf,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Info,
 } from "lucide-solid";
 import type { IPayloadESP32, IControlStatus } from "./types/esp32";
 import { createDeviceWebSocket, type ConnectionState } from "./hooks/useDeviceWebSocket";
+import { EChart } from "./components/EChart";
+import { Sparkline } from "./components/Sparkline";
+import { gaugeOption, trendOption, pressureOption, computeVPD, classifyVPD } from "./lib/charts";
 import {
   getDevice,
   sendControl,
@@ -30,12 +42,21 @@ import {
   getTelemetryHistory,
   listActiveAlarms,
   ackAlarm,
+  listSchedules,
+  createSchedule,
+  updateSchedule,
+  deleteSchedule,
+  enableSchedule,
+  disableSchedule,
   type IAlarmEvent,
-  type ITelemetryRecord
+  type ITelemetryRecord,
+  type ISchedule
 } from "./services/api";
 
 // ─── Configuração ──────────────────────────────────────
 const DEVICE_ID = import.meta.env.VITE_DEVICE_ID || "esp32-001";
+
+type Tab = "painel" | "controle" | "alarmes" | "historico" | "agendamentos" | "sistema";
 
 // ─── Estado padrão (fallback quando offline) ───────────
 const DEFAULT_PAYLOAD: IPayloadESP32 = {
@@ -75,24 +96,6 @@ const formatUptime = (seconds: number) => {
   return `${h}h ${m}m`;
 };
 
-// ─── Componente Badge de Conexão ───────────────────────
-function ConnectionBadge(props: { state: ConnectionState }) {
-  const config = () => {
-    switch (props.state) {
-      case "connected": return { icon: <Wifi size={12} />, label: "Backend Online", cls: styles.online };
-      case "connecting": return { icon: <Loader2 size={12} class={styles.spin} />, label: "Conectando...", cls: styles.connecting };
-      case "disconnected": return { icon: <WifiOff size={12} />, label: "Backend Offline", cls: styles.offline };
-    }
-  };
-
-  return (
-    <div class={`${styles.chip} ${config().cls}`}>
-      {config().icon}
-      <span style={{ "margin-left": "4px" }}>{config().label}</span>
-    </div>
-  );
-}
-
 // ─── Componente Principal ──────────────────────────────
 export default function App() {
   const [isDark, setIsDark] = createSignal(true);
@@ -102,11 +105,26 @@ export default function App() {
   // `conexao.estado` autodeclarado pelo próprio ESP (que congela em "online").
   const [deviceOnline, setDeviceOnline] = createSignal(false);
   const [sending, setSending] = createSignal(false);
-  const [activeTab, setActiveTab] = createSignal<"painel" | "controle" | "alarmes" | "historico">("painel");
+  const [activeTab, setActiveTab] = createSignal<Tab>("painel");
+  const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  const [showVpdInfo, setShowVpdInfo] = createSignal(false);
 
   // Novos Sinais para as Funcionalidades Adicionais
   const [alarms, setAlarms] = createSignal<IAlarmEvent[]>([]);
   const [telemetryHistory, setTelemetryHistory] = createSignal<ITelemetryRecord[]>([]);
+
+  // Schedule state
+  const [schedules, setSchedules] = createSignal<ISchedule[]>([]);
+  const [showScheduleModal, setShowScheduleModal] = createSignal(false);
+  const [editingSchedule, setEditingSchedule] = createSignal<ISchedule | null>(null);
+  const [scheduleForm, setScheduleForm] = createSignal({
+    name: '',
+    valve_number: 1,
+    schedule_type: 'one_time' as string,
+    start_at: '',
+    duration_sec: 1800,
+    is_enabled: true,
+  });
 
   // Histórico de coleta paginado (server-side, independente do gráfico)
   const HISTORY_PAGE_SIZE = 15;
@@ -138,8 +156,6 @@ export default function App() {
       onConfirm
     });
   }
-
-  let canvasRef: HTMLCanvasElement | undefined;
 
   // ─── Theme ─────────────────────────────────────────
   createEffect(() => {
@@ -223,6 +239,13 @@ export default function App() {
     }
   });
 
+  // Ao abrir a aba de agendamentos, recarrega os dados.
+  createEffect(() => {
+    if (activeTab() === "agendamentos") {
+      loadSchedules();
+    }
+  });
+
   // ─── Enviar controle ao backend ────────────────────
   async function handleControlChange(newControl: IControlStatus) {
     setSysData((prev: IPayloadESP32) => ({ ...prev, controle: newControl }));
@@ -259,129 +282,101 @@ export default function App() {
     }
   }
 
+  // ─── Schedule Functions ─────────────────────────────
+  async function loadSchedules() {
+    try {
+      const data = await listSchedules();
+      setSchedules(data ?? []);
+    } catch (err) {
+      console.warn("[API] Erro ao buscar agendamentos:", err);
+    }
+  }
+
+  function resetScheduleForm() {
+    setEditingSchedule(null);
+    setScheduleForm({
+      name: '',
+      valve_number: 1,
+      schedule_type: 'one_time',
+      start_at: '',
+      duration_sec: 1800,
+      is_enabled: true,
+    });
+  }
+
+  function openEditSchedule(schedule: ISchedule) {
+    setEditingSchedule(schedule);
+    setScheduleForm({
+      name: schedule.name,
+      valve_number: schedule.valve_number,
+      schedule_type: schedule.schedule_type,
+      start_at: schedule.start_at ?? '',
+      duration_sec: schedule.duration_sec,
+      is_enabled: schedule.is_enabled,
+    });
+    setShowScheduleModal(true);
+  }
+
+  async function handleScheduleSubmit(e: Event) {
+    e.preventDefault();
+    const form = scheduleForm();
+    const editing = editingSchedule();
+    try {
+      if (editing) {
+        await updateSchedule(editing.id, {
+          name: form.name,
+          valve_number: form.valve_number,
+          schedule_type: form.schedule_type,
+          start_at: form.start_at || null,
+          duration_sec: form.duration_sec,
+          is_enabled: form.is_enabled,
+        });
+      } else {
+        await createSchedule({
+          name: form.name,
+          valve_number: form.valve_number,
+          schedule_type: form.schedule_type,
+          start_at: form.start_at || null,
+          duration_sec: form.duration_sec,
+          is_enabled: form.is_enabled,
+        });
+      }
+      await loadSchedules();
+      setShowScheduleModal(false);
+      resetScheduleForm();
+    } catch (err) {
+      console.error("[API] Erro ao salvar agendamento:", err);
+    }
+  }
+
+  async function handleDeleteSchedule(id: string) {
+    if (!confirm('Excluir este agendamento?')) return;
+    try {
+      await deleteSchedule(id);
+      await loadSchedules();
+    } catch (err) {
+      console.error("[API] Erro ao excluir agendamento:", err);
+    }
+  }
+
+  async function handleToggleSchedule(schedule: ISchedule) {
+    try {
+      if (schedule.is_enabled) {
+        await disableSchedule(schedule.id);
+      } else {
+        await enableSchedule(schedule.id);
+      }
+      await loadSchedules();
+    } catch (err) {
+      console.error("[API] Erro ao alterar agendamento:", err);
+    }
+  }
+
   // Helper para atualizar controle
   function updateControl(updater: (prev: IControlStatus) => IControlStatus) {
     const newControl = updater(sysData().controle);
     handleControlChange(newControl);
   }
-
-  // ─── Efeito para desenhar o gráfico HTML Canvas ─────
-  createEffect(() => {
-    const history = telemetryHistory();
-    const tab = activeTab(); // Dependência reativa de aba ativa!
-    if (tab !== "painel" || !canvasRef || history.length === 0) return;
-
-    const ctx = canvasRef.getContext("2d");
-    if (!ctx) return;
-
-    // Redimensionamento HD Canvas
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvasRef.getBoundingClientRect();
-    canvasRef.width = rect.width * dpr;
-    canvasRef.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
-
-    const w = rect.width;
-    const h = rect.height;
-
-    // Limpar tela
-    ctx.clearRect(0, 0, w, h);
-
-    // Grid e bordas
-    ctx.strokeStyle = isDark() ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.05)";
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const y = (h / 4) * i;
-      ctx.beginPath();
-      ctx.moveTo(30, y);
-      ctx.lineTo(w - 10, y);
-      ctx.stroke();
-    }
-
-    const paddingLeft = 35;
-    const paddingRight = 15;
-    const paddingTop = 20;
-    const paddingBottom = 20;
-    const chartW = w - paddingLeft - paddingRight;
-    const chartH = h - paddingTop - paddingBottom;
-
-    const maxTemp = 50;
-    const minTemp = 0;
-    const maxUmid = 100;
-    const minUmid = 0;
-
-    // Helper para mapear coordenadas
-    const getX = (index: number) => paddingLeft + (index / (history.length - 1)) * chartW;
-    const getY = (val: number, min: number, max: number) => {
-      const pct = (val - min) / (max - min);
-      return h - paddingBottom - pct * chartH;
-    };
-
-    // Desenhar Linha de Temperatura (Laranja)
-    ctx.beginPath();
-    ctx.strokeStyle = "#ff7a00";
-    ctx.lineWidth = 2.5;
-    history.forEach((rec: ITelemetryRecord, idx: number) => {
-      const x = getX(idx);
-      const y = getY(rec.temperatura_c, minTemp, maxTemp);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // Gradiente abaixo da Temperatura
-    const tempGrad = ctx.createLinearGradient(0, paddingTop, 0, h - paddingBottom);
-    tempGrad.addColorStop(0, "rgba(255, 122, 0, 0.15)");
-    tempGrad.addColorStop(1, "rgba(255, 122, 0, 0.0)");
-    ctx.beginPath();
-    history.forEach((rec: ITelemetryRecord, idx: number) => {
-      const x = getX(idx);
-      const y = getY(rec.temperatura_c, minTemp, maxTemp);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.lineTo(getX(history.length - 1), h - paddingBottom);
-    ctx.lineTo(getX(0), h - paddingBottom);
-    ctx.closePath();
-    ctx.fillStyle = tempGrad;
-    ctx.fill();
-
-    // Desenhar Linha de Umidade (Azul)
-    ctx.beginPath();
-    ctx.strokeStyle = "#007aff";
-    ctx.lineWidth = 2.5;
-    history.forEach((rec: ITelemetryRecord, idx: number) => {
-      const x = getX(idx);
-      const y = getY(rec.umidade_pct, minUmid, maxUmid);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-    // Gradiente abaixo da Umidade
-    const umidGrad = ctx.createLinearGradient(0, paddingTop, 0, h - paddingBottom);
-    umidGrad.addColorStop(0, "rgba(0, 122, 255, 0.12)");
-    umidGrad.addColorStop(1, "rgba(0, 122, 255, 0.0)");
-    ctx.beginPath();
-    history.forEach((rec: ITelemetryRecord, idx: number) => {
-      const x = getX(idx);
-      const y = getY(rec.umidade_pct, minUmid, maxUmid);
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.lineTo(getX(history.length - 1), h - paddingBottom);
-    ctx.lineTo(getX(0), h - paddingBottom);
-    ctx.closePath();
-    ctx.fillStyle = umidGrad;
-    ctx.fill();
-
-    // Textos de escala
-    ctx.fillStyle = isDark() ? "#8a8a93" : "#71717a";
-    ctx.font = "10px monospace";
-    ctx.fillText("50°C", 5, paddingTop + 4);
-    ctx.fillText("25°C", 5, paddingTop + chartH / 2 + 4);
-    ctx.fillText("0°C", 5, h - paddingBottom + 4);
-  });
 
   // ─── Atalhos reactivos ────────────────────────────
   const s = () => sysData().status_sistema;
@@ -389,86 +384,668 @@ export default function App() {
   // Verdade do backend (last_seen) — não o `conexao.estado` autodeclarado pelo ESP.
   const isOnline = () => deviceOnline();
 
+  // ─── Derivados para os gráficos do painel ─────────
+  const series = (key: "temperatura_c" | "umidade_pct" | "pressao_hpa") =>
+    telemetryHistory().map((r) => r[key]);
+
+  // Variação na janela exibida (último - primeiro) para a seta de tendência.
+  function trend(key: "temperatura_c" | "umidade_pct" | "pressao_hpa") {
+    const v = series(key);
+    if (v.length < 2) return { delta: 0, dir: "flat" as const };
+    const delta = v[v.length - 1] - v[0];
+    const dir = Math.abs(delta) < 0.05 ? "flat" : delta > 0 ? "up" : "down";
+    return { delta, dir } as { delta: number; dir: "up" | "down" | "flat" };
+  }
+
+  const vpd = () => computeVPD(s().sensores.clima.temperatura_c, s().sensores.clima.umidade_pct);
+
+  // Estado real das 6 saídas físicas do ESP (telecomando).
+  const valves = () => {
+    const tc = c().telecomando;
+    return [
+      { label: "Irrigação 1", on: tc.irrigacao.conjunto_1 },
+      { label: "Irrigação 2", on: tc.irrigacao.conjunto_2 },
+      { label: "Adubação S1·B1", on: tc.adubacao.solucao_1.bag_1 },
+      { label: "Adubação S1·B2", on: tc.adubacao.solucao_1.bag_2 },
+      { label: "Adubação S2·B1", on: tc.adubacao.solucao_2.bag_1 },
+      { label: "Adubação S2·B2", on: tc.adubacao.solucao_2.bag_2 },
+    ];
+  };
+
+  // ─── Navegação ────────────────────────────────────
+  const navItems: { id: Tab; label: string; icon: any }[] = [
+    { id: "painel", label: "Painel", icon: LayoutDashboard },
+    { id: "controle", label: "Controle & Agenda", icon: Power },
+    { id: "alarmes", label: "Alarmes", icon: AlertTriangle },
+    { id: "historico", label: "Histórico", icon: FileText },
+    { id: "agendamentos", label: "Agendamentos", icon: Calendar },
+    { id: "sistema", label: "Sistema", icon: Cpu },
+  ];
+
+  const pageMeta: Record<Tab, { title: string; subtitle: string }> = {
+    painel: { title: "Painel da Estufa", subtitle: "Telemetria crucial em tempo real" },
+    controle: { title: "Controle & Agenda", subtitle: "Telecomando manual e horários locais" },
+    alarmes: { title: "Alarmes Operacionais", subtitle: "Supervisão de eventos do dispositivo" },
+    historico: { title: "Histórico de Coleta", subtitle: "Leituras de telemetria registradas" },
+    agendamentos: { title: "Agendamentos", subtitle: "Programação de irrigação" },
+    sistema: { title: "Sistema & Dispositivo", subtitle: "Diagnóstico do controlador ESP32" },
+  };
+
+  function goTo(tab: Tab) {
+    setActiveTab(tab);
+    setSidebarOpen(false);
+  }
+
+  // Selo de variação (seta + delta) usado nos cards do painel.
+  const TrendChip = (p: { t: { delta: number; dir: "up" | "down" | "flat" }; unit: string }) => (
+    <span class={styles.trendChip} title="Variação na janela exibida">
+      {p.t.dir === "up" ? <TrendingUp size={13} /> : p.t.dir === "down" ? <TrendingDown size={13} /> : <Minus size={13} />}
+      {(p.t.delta >= 0 ? "+" : "") + p.t.delta.toFixed(1) + p.unit}
+    </span>
+  );
+
   return (
-    <div class={styles.container}>
-      {/* HEADER */}
-      <header class={styles.header}>
-        <div class={styles.titleArea}>
-          <div class={styles.logo} style={{ background: "var(--bg-base)" }}>
-            <span style={{ "font-size": "20px", "font-weight": "800", color: "var(--fg-base)" }}>FI</span>
-          </div>
-          <h1 class={styles.title}>FertIrriga Edge Dashboard</h1>
-          <div class={`${styles.chip} ${isOnline() ? styles.online : styles.offline}`}>
-            <span class={styles.dot} />
-            {isOnline() ? "ESP32 Conectado" : "ESP32 Desconectado"}
-          </div>
-          <ConnectionBadge state={connectionState()} />
-        </div>
-
-        <button class={styles.iconBtn} onClick={() => setIsDark(!isDark())} aria-label="Toggle Theme">
-          {isDark() ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
-      </header>
-
-      {/* PARADA DE EMERGÊNCIA (Sempre Visível) */}
-      <Show when={sysData().seguranca.parada_emergencia}>
-        <div class={styles.alert} style={{ "margin-bottom": "-20px" }}>
-          <AlertTriangle size={18} />
-          <span>PARADA DE EMERGÊNCIA ATIVA — ATUADORES BLOQUEADOS POR SEGURANÇA</span>
-          <button class={styles.emergencyResetBtn} onClick={handleEmergencyStop} disabled={sending()}>
-            RESETAR SISTEMA
-          </button>
-        </div>
+    <div class={styles.app}>
+      {/* ─── SIDEBAR LATERAL ──────────────────────────── */}
+      <Show when={sidebarOpen()}>
+        <div class={styles.backdrop} onClick={() => setSidebarOpen(false)} />
       </Show>
 
-      {/* NAVEGAÇÃO POR ABAS (TABS SELECTOR) */}
-      <div class={styles.tabsContainer}>
-        <button
-          class={`${styles.tabBtn} ${activeTab() === "painel" ? styles.activeTab : ""}`}
-          onClick={() => setActiveTab("painel")}
-        >
-          <Activity size={16} />
-          Painel & Telemetria
-        </button>
-        <button
-          class={`${styles.tabBtn} ${activeTab() === "controle" ? styles.activeTab : ""}`}
-          onClick={() => setActiveTab("controle")}
-        >
-          <Power size={16} />
-          Controle & Agenda
-        </button>
-        <button
-          class={`${styles.tabBtn} ${activeTab() === "alarmes" ? styles.activeTab : ""}`}
-          onClick={() => setActiveTab("alarmes")}
-        >
-          <AlertTriangle size={16} />
-          Alarmes Operacionais
-          <Show when={alarms().length > 0}>
-            <span class={styles.badgeCount}>{alarms().length}</span>
-          </Show>
-        </button>
-        <button
-          class={`${styles.tabBtn} ${activeTab() === "historico" ? styles.activeTab : ""}`}
-          onClick={() => setActiveTab("historico")}
-        >
-          <FileText size={16} />
-          Histórico (Coleta de Dados)
-        </button>
-      </div>
+      <aside class={`${styles.sidebar} ${sidebarOpen() ? styles.sidebarOpen : ""}`}>
+        <div class={styles.brand}>
+          <img src="/fertirriga.avif" alt="FertIrriga" class={styles.brandLogo} />
+          <div class={styles.brandText}>
+            <span class={styles.brandName}>FertIrriga</span>
+            <span class={styles.brandSub}>Edge Dashboard</span>
+          </div>
+        </div>
 
-      {/* ─── ABA 1: PAINEL & TELEMETRIA ────────────────────── */}
-      <Show when={activeTab() === "painel"}>
-        <section class={styles.sectionWrapper}>
-          <div class={styles.sectionHeader}>
-            <Activity size={20} />
-            Supervisão Física do ESP32
+        <nav class={styles.nav}>
+          <For each={navItems}>
+            {(item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  class={`${styles.navItem} ${activeTab() === item.id ? styles.navActive : ""}`}
+                  onClick={() => goTo(item.id)}
+                >
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                  <Show when={item.id === "alarmes" && alarms().length > 0}>
+                    <span class={styles.navBadge}>{alarms().length}</span>
+                  </Show>
+                </button>
+              );
+            }}
+          </For>
+        </nav>
+
+        <div class={styles.sidebarFooter}>
+          <div class={`${styles.statusPill} ${isOnline() ? styles.pillOk : styles.pillBad}`}>
+            <span class={styles.dot} />
+            {isOnline() ? "ESP32 Conectado" : "ESP32 Offline"}
+          </div>
+          <div class={`${styles.statusPill} ${styles.pillSubtle}`}>
+            {connectionState() === "connected" ? <Wifi size={13} /> :
+             connectionState() === "connecting" ? <Loader2 size={13} class={styles.spin} /> :
+             <WifiOff size={13} />}
+            {connectionState() === "connected" ? "Backend Online" :
+             connectionState() === "connecting" ? "Conectando…" : "Backend Offline"}
+          </div>
+          <button class={styles.themeBtn} onClick={() => setIsDark(!isDark())}>
+            {isDark() ? <Sun size={16} /> : <Moon size={16} />}
+            {isDark() ? "Tema Claro" : "Tema Escuro"}
+          </button>
+        </div>
+      </aside>
+
+      {/* ─── CONTEÚDO PRINCIPAL ───────────────────────── */}
+      <main class={styles.main}>
+        <header class={styles.topbar}>
+          <button class={styles.menuBtn} onClick={() => setSidebarOpen(true)} aria-label="Menu">
+            <Menu size={20} />
+          </button>
+          <div class={styles.pageTitleArea}>
+            <h1 class={styles.pageTitle}>{pageMeta[activeTab()].title}</h1>
+            <p class={styles.pageSubtitle}>{pageMeta[activeTab()].subtitle}</p>
+          </div>
+          <Show when={sending()}>
+            <div class={styles.savingChip}><Loader2 size={14} class={styles.spin} /> Enviando…</div>
+          </Show>
+        </header>
+
+        {/* PARADA DE EMERGÊNCIA (Sempre Visível) */}
+        <Show when={sysData().seguranca.parada_emergencia}>
+          <div class={styles.alert}>
+            <AlertTriangle size={18} />
+            <span>PARADA DE EMERGÊNCIA ATIVA — ATUADORES BLOQUEADOS POR SEGURANÇA</span>
+            <button class={styles.emergencyResetBtn} onClick={handleEmergencyStop} disabled={sending()}>
+              RESETAR SISTEMA
+            </button>
+          </div>
+        </Show>
+
+        {/* ─── PÁGINA 1: PAINEL ───────────────────────── */}
+        <Show when={activeTab() === "painel"}>
+          {/* Mostradores (gauges) com a telemetria crucial + sparklines */}
+          <div class={styles.gaugeGrid}>
+            <div class={styles.gaugeCard}>
+              <div class={styles.gaugeHead}>
+                <Thermometer size={16} /> Temperatura
+                <TrendChip t={trend("temperatura_c")} unit="°" />
+              </div>
+              <div class={styles.gaugeChart}>
+                <EChart option={gaugeOption({ value: s().sensores.clima.temperatura_c, min: 0, max: 50, unit: "°", color: "#e68619", dark: isDark() })} class={styles.fill} />
+              </div>
+              <div class={styles.gaugeBottom}><Sparkline values={series("temperatura_c")} color="#e68619" /></div>
+            </div>
+
+            <div class={styles.gaugeCard}>
+              <div class={styles.gaugeHead}>
+                <Droplets size={16} /> Umidade do Ar
+                <TrendChip t={trend("umidade_pct")} unit="%" />
+              </div>
+              <div class={styles.gaugeChart}>
+                <EChart option={gaugeOption({ value: s().sensores.clima.umidade_pct, min: 0, max: 100, unit: "%", color: "#2680eb", dark: isDark() })} class={styles.fill} />
+              </div>
+              <div class={styles.gaugeBottom}><Sparkline values={series("umidade_pct")} color="#2680eb" /></div>
+            </div>
+
+            <div class={styles.gaugeCard}>
+              <div class={styles.gaugeHead}>
+                <CloudRain size={16} /> Pressão
+                <TrendChip t={trend("pressao_hpa")} unit="" />
+              </div>
+              <div class={styles.gaugeChart}>
+                <EChart option={gaugeOption({ value: s().sensores.clima.pressao_hpa, min: 950, max: 1050, unit: "", color: "#9256d9", dark: isDark(), decimals: 0 })} class={styles.fill} />
+              </div>
+              <div class={styles.gaugeBottom}><Sparkline values={series("pressao_hpa")} color="#9256d9" /></div>
+            </div>
+
+            {/* VPD — déficit de pressão de vapor (conforto da planta) */}
+            <div class={styles.gaugeCard}>
+              <div class={styles.gaugeHead}>
+                <Leaf size={16} /> VPD
+                <button
+                  class={styles.infoBtn}
+                  aria-label="O que é VPD?"
+                  aria-expanded={showVpdInfo()}
+                  onClick={() => setShowVpdInfo((v) => !v)}
+                >
+                  <Info size={14} />
+                </button>
+                <Show
+                  when={isOnline()}
+                  fallback={<span class={styles.trendChip}>Sem dados</span>}
+                >
+                  <span class={styles.trendChip} style={{ color: classifyVPD(vpd()).color, "border-color": classifyVPD(vpd()).color }}>
+                    {classifyVPD(vpd()).label}
+                  </span>
+                </Show>
+              </div>
+
+              <Show when={showVpdInfo()}>
+                <div class={styles.infoBackdrop} onClick={() => setShowVpdInfo(false)} />
+                <div class={styles.infoPopover} role="dialog" aria-label="Sobre o VPD">
+                  <div class={styles.infoTitle}>VPD — Déficit de Pressão de Vapor</div>
+                  <p class={styles.infoText}>
+                    Mede o “poder de secagem” do ar — é o que governa a transpiração da planta na estufa.
+                  </p>
+                  <p class={styles.infoText}>
+                    Calculado a partir da <strong>temperatura e umidade</strong> que o ESP32 já envia — não é um sensor novo.
+                  </p>
+                  <div class={styles.infoRanges}>
+                    <span><span class={styles.infoDot} style={{ background: "#2680eb" }} /> &lt; 0,8 kPa — úmido demais (risco de fungo)</span>
+                    <span><span class={styles.infoDot} style={{ background: "#2d9d78" }} /> 0,8–1,2 kPa — ideal</span>
+                    <span><span class={styles.infoDot} style={{ background: "#e68619" }} /> &gt; 1,2 kPa — seco (estresse hídrico)</span>
+                  </div>
+                </div>
+              </Show>
+
+              <div class={styles.gaugeChart}>
+                <Show
+                  when={isOnline()}
+                  fallback={<div class={styles.gaugeEmpty}><span class={styles.gaugeEmptyValue}>—</span><span class={styles.gaugeEmptyHint}>ESP32 offline</span></div>}
+                >
+                  <EChart option={gaugeOption({ value: vpd(), min: 0, max: 2, unit: "", color: classifyVPD(vpd()).color, dark: isDark(), decimals: 2 })} class={styles.fill} />
+                </Show>
+              </div>
+              <div class={styles.gaugeBottom}><span class={styles.gaugeFootText}>kPa · ideal 0,8–1,2</span></div>
+            </div>
           </div>
 
-          <div class={styles.bentoGrid}>
-            {/* Card: Conexão & Uptime */}
-            <div class={`${styles.card} ${styles.span2}`}>
-              <div class={styles.cardTop}><Wifi size={16} /> Rede & Controlador</div>
-              <div style={{ "margin-top": "auto", display: "flex", "flex-direction": "column" }}>
+          {/* Tendência (principal) + Estado hidráulico/válvulas */}
+          <div class={styles.dashRow}>
+            <div class={styles.panel}>
+              <div class={styles.panelHead}>
+                <Activity size={16} />
+                <span>Tendência — Temperatura × Umidade (tempo real)</span>
+              </div>
+              <div class={styles.chartMain}>
+                <Show
+                  when={telemetryHistory().length > 1}
+                  fallback={<div class={styles.emptyChart}><Activity size={20} /> Aguardando telemetria do ESP32…</div>}
+                >
+                  <EChart option={trendOption(telemetryHistory(), isDark())} class={styles.fill} />
+                </Show>
+              </div>
+            </div>
+
+            <div class={styles.panel}>
+              <div class={styles.panelHead}>
+                <Power size={16} /> Estado Hidráulico
+                <span class={styles.panelHint}>{valves().filter((v) => v.on).length}/6 ativas</span>
+              </div>
+              <div class={styles.panelBody}>
+                <div class={styles.valveGrid}>
+                  <For each={valves()}>
+                    {(v) => (
+                      <div
+                        class={`${styles.valveItem} ${v.on ? styles.valveOn : ""}`}
+                        role="status"
+                        aria-label={`${v.label}: ${v.on ? "ligada" : "desligada"}`}
+                      >
+                        <span class={styles.valveDot} />
+                        <span class={styles.valveLabel}>{v.label}</span>
+                        <span class={styles.valveState}>{v.on ? "LIGADA" : "—"}</span>
+                      </div>
+                    )}
+                  </For>
+                </div>
+                <div class={styles.flowNote}>
+                  <Waves size={14} />
+                  <span>Fluxo / vazão: <strong>sem sensor no ESP32</strong></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Pressão ao longo do tempo */}
+          <div class={styles.panel}>
+            <div class={styles.panelHead}>
+              <CloudRain size={16} />
+              <span>Pressão barométrica ao longo do tempo</span>
+            </div>
+            <div class={styles.chartWide}>
+              <Show
+                when={telemetryHistory().length > 1}
+                fallback={<div class={styles.emptyChart}><Activity size={20} /> Aguardando telemetria do ESP32…</div>}
+              >
+                <EChart option={pressureOption(telemetryHistory(), isDark())} class={styles.fill} />
+              </Show>
+            </div>
+          </div>
+        </Show>
+
+        {/* ─── PÁGINA 2: CONTROLE & AGENDA ────────────── */}
+        <Show when={activeTab() === "controle"}>
+          <div class={styles.twoCol}>
+            {/* Telecomando Manual */}
+            <section class={styles.panel}>
+              <div class={styles.panelHead}>
+                <Power size={16} /> Telecomando Manual
+              </div>
+              <div class={styles.panelBody}>
+                <div class={styles.actionGroup}>
+                  <div class={styles.actionTitle}>Irrigação</div>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Válvula 1</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_1}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.irrigacao.conjunto_1;
+                          confirmToggle("Irrigação Válvula 1", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_1: checked } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Válvula 2</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_2}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.irrigacao.conjunto_2;
+                          confirmToggle("Irrigação Válvula 2", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_2: checked } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                </div>
+
+                <div class={styles.actionGroup} style={{ "margin-bottom": "0" }}>
+                  <div class={styles.actionTitle}>Fertirrigação Soluções</div>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Solução 1 - Válvula 1</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_1}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.adubacao.solucao_1.bag_1;
+                          confirmToggle("Adubação Solução 1 Válvula 1", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_1: checked } } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Solução 1 - Válvula 2</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_2}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.adubacao.solucao_1.bag_2;
+                          confirmToggle("Adubação Solução 1 Válvula 2", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_2: checked } } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Solução 2 - Válvula 1</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_1}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.adubacao.solucao_2.bag_1;
+                          confirmToggle("Adubação Solução 2 Válvula 1", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_1: checked } } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Solução 2 - Válvula 2</span>
+                    <div class={styles.toggle}>
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_2}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const checked = !c().telecomando.adubacao.solucao_2.bag_2;
+                          confirmToggle("Adubação Solução 2 Válvula 2", !checked, () => {
+                            updateControl((prev) => ({
+                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_2: checked } } }
+                            }));
+                          });
+                        }} />
+                      <span class={styles.slider}></span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            {/* Sincronização de Agenda Local */}
+            <section class={styles.panel}>
+              <div class={styles.panelHead}>
+                <Calendar size={16} /> Sincronização de Agenda Local
+              </div>
+              <div class={styles.panelBody}>
+                <div class={styles.actionGroup}>
+                  <div class={styles.actionTitle}>Horários de Irrigação</div>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Válvula 1</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.irrigacao.conjunto_1}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, irrigacao: { ...prev.agendamento.irrigacao, conjunto_1: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Válvula 2</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.irrigacao.conjunto_2}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, irrigacao: { ...prev.agendamento.irrigacao, conjunto_2: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                </div>
+
+                <div class={styles.actionGroup} style={{ "margin-bottom": "0" }}>
+                  <div class={styles.actionTitle}>Programação de Fertirrigação</div>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Adubação Solução 1 Válvula 1</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_1_bag_1}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_1_bag_1: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Adubação Solução 1 Válvula 2</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_1_bag_2}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_1_bag_2: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Adubação Solução 2 Válvula 1</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_2_bag_1}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_2_bag_1: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                  <label class={styles.switchRow}>
+                    <span class={styles.switchLabel}>Adubação Solução 2 Válvula 2</span>
+                    <div class={styles.timeWrapper}>
+                      <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_2_bag_2}
+                        onInput={(e) => updateControl((prev) => ({
+                          ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_2_bag_2: e.currentTarget.value } }
+                        }))} />
+                    </div>
+                  </label>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Show>
+
+        {/* ─── PÁGINA 3: ALARMES ──────────────────────── */}
+        <Show when={activeTab() === "alarmes"}>
+          <section class={styles.panel}>
+            <div class={styles.panelHead}><AlertTriangle size={16} /> Alarmes Ativos no Dispositivo</div>
+            <div class={styles.panelBody}>
+              <Show
+                when={alarms().length > 0}
+                fallback={
+                  <div class={styles.noAlarms}>
+                    <CheckCircle size={16} />
+                    <span>Nenhum alarme operacional ativo. Sistema seguro.</span>
+                  </div>
+                }
+              >
+                <div class={styles.itemList}>
+                  <For each={alarms()}>
+                    {(alarm: IAlarmEvent) => {
+                      const severity = () => alarm.rule_severity || "info";
+                      return (
+                        <div class={`${styles.listItem} ${styles[severity()] ?? ""}`}>
+                          <div class={styles.itemInfo}>
+                            <span class={styles.itemName}>{alarm.rule_name}</span>
+                            <span class={styles.itemMeta}>
+                              Disparado em: {new Date(alarm.triggered_at).toLocaleTimeString()} · Severidade: {severity().toUpperCase()}
+                            </span>
+                          </div>
+                          <button class={styles.btn} onClick={() => handleAckAlarm(alarm.id)}>
+                            Reconhecer
+                          </button>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </section>
+        </Show>
+
+        {/* ─── PÁGINA 4: HISTÓRICO ────────────────────── */}
+        <Show when={activeTab() === "historico"}>
+          <section class={styles.panel}>
+            <div class={styles.panelHead}>
+              <FileText size={16} /> Leituras dos Sensores (mais recentes primeiro)
+              <Show when={histLoading()}><Loader2 size={14} class={styles.spin} style={{ "margin-left": "8px" }} /></Show>
+            </div>
+            <div class={styles.panelBody}>
+              <Show
+                when={histRecords().length > 0}
+                fallback={
+                  <div class={styles.noAlarms} style={{ color: "var(--text-secondary)" }}>
+                    <Activity size={16} />
+                    <span>Nenhuma leitura coletada ainda. Aguardando telemetria do ESP32.</span>
+                  </div>
+                }
+              >
+                <div class={styles.dataTableWrap}>
+                  <table class={styles.dataTable}>
+                    <thead>
+                      <tr>
+                        <th>Horário</th>
+                        <th>Temp. (°C)</th>
+                        <th>Umidade (%)</th>
+                        <th>Pressão (hPa)</th>
+                        <th>Fluxo</th>
+                        <th>Vazão (L/m)</th>
+                        <th>Wi-Fi (dBm)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <For each={histRecords()}>
+                        {(rec: ITelemetryRecord) => (
+                          <tr>
+                            <td>{new Date(rec.recorded_at).toLocaleString()}</td>
+                            <td>{rec.temperatura_c.toFixed(1)}</td>
+                            <td>{rec.umidade_pct.toFixed(1)}</td>
+                            <td>{rec.pressao_hpa.toFixed(1)}</td>
+                            <td class={rec.fluxo_detectado ? styles.flowYes : styles.flowNo}>
+                              {rec.fluxo_detectado ? "ATIVO" : "—"}
+                            </td>
+                            <td>{rec.vazao_lpm.toFixed(1)}</td>
+                            <td>{rec.sinal_wifi_dbm}</td>
+                          </tr>
+                        )}
+                      </For>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class={styles.pagination}>
+                  <span class={styles.paginationInfo}>
+                    {histTotal()} leituras · Página {histPage()} de {histTotalPages()}
+                  </span>
+                  <div class={styles.paginationControls}>
+                    <button
+                      class={styles.pageBtn}
+                      disabled={histPage() <= 1 || histLoading()}
+                      onClick={() => loadHistoryPage(histPage() - 1)}
+                    >
+                      <ChevronLeft size={16} /> Anterior
+                    </button>
+                    <button
+                      class={styles.pageBtn}
+                      disabled={histPage() >= histTotalPages() || histLoading()}
+                      onClick={() => loadHistoryPage(histPage() + 1)}
+                    >
+                      Próxima <ChevronRight size={16} />
+                    </button>
+                  </div>
+                </div>
+              </Show>
+            </div>
+          </section>
+        </Show>
+
+        {/* ─── PÁGINA 5: AGENDAMENTOS ─────────────────── */}
+        <Show when={activeTab() === "agendamentos"}>
+          <section class={styles.panel}>
+            <div class={styles.panelHead}>
+              <Calendar size={16} /> Agendamentos de Irrigação
+              <button
+                class={styles.btnPrimary}
+                style={{ "margin-left": "auto" }}
+                onClick={() => { resetScheduleForm(); setShowScheduleModal(true); }}
+              >
+                + Novo Agendamento
+              </button>
+            </div>
+            <div class={styles.panelBody}>
+              <Show
+                when={schedules().length > 0}
+                fallback={
+                  <div class={styles.noAlarms} style={{ color: "var(--text-secondary)" }}>
+                    <Calendar size={16} />
+                    <span>Nenhum agendamento configurado. Crie um novo agendamento.</span>
+                  </div>
+                }
+              >
+                <div class={styles.itemList}>
+                  <For each={schedules()}>
+                    {(schedule) => (
+                      <div class={styles.listItem} style={{ opacity: schedule.is_enabled ? 1 : 0.55 }}>
+                        <div class={styles.itemInfo}>
+                          <span class={styles.itemName}>{schedule.name}</span>
+                          <span class={styles.itemMeta}>
+                            Válvula {schedule.valve_number} · {Math.floor(schedule.duration_sec / 60)} min · {schedule.schedule_type === 'recurring' ? 'Recorrente' : 'Único'}
+                            {schedule.start_at ? ` · ${new Date(schedule.start_at).toLocaleString()}` : ''}
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
+                          <button
+                            class={styles.btn}
+                            onClick={() => handleToggleSchedule(schedule)}
+                          >
+                            {schedule.is_enabled ? 'Desativar' : 'Ativar'}
+                          </button>
+                          <button class={styles.btn} onClick={() => openEditSchedule(schedule)}>Editar</button>
+                          <button class={styles.btnDanger} onClick={() => handleDeleteSchedule(schedule.id)}>
+                            Excluir
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </section>
+        </Show>
+
+        {/* ─── PÁGINA 6: SISTEMA & DISPOSITIVO ────────── */}
+        <Show when={activeTab() === "sistema"}>
+          <div class={styles.twoCol}>
+            <section class={styles.panel}>
+              <div class={styles.panelHead}><Wifi size={16} /> Rede & Controlador</div>
+              <div class={styles.panelBody}>
+                <div class={styles.infoRow}>
+                  <span class={styles.infoLabel}>Estado do ESP32</span>
+                  <span class={styles.infoValue} style={{ color: isOnline() ? "var(--success)" : "var(--danger)" }}>
+                    {isOnline() ? "Conectado" : "Offline"}
+                  </span>
+                </div>
                 <div class={styles.infoRow}>
                   <span class={styles.infoLabel}>Força do Sinal Wi-Fi</span>
                   <span class={styles.infoValue}>{s().conexao.sinal_wifi_dbm} dBm</span>
@@ -480,422 +1057,152 @@ export default function App() {
                     {formatUptime(s().conexao.tempo_ligado_seg)}
                   </span>
                 </div>
-              </div>
-            </div>
-
-            {/* Card: Operação */}
-            <div class={`${styles.card} ${styles.span2}`}>
-              <div class={styles.cardTop}><Settings2 size={16} /> Operação Hidráulica</div>
-              <div style={{ "margin-top": "auto", display: "flex", "flex-direction": "column" }}>
                 <div class={styles.infoRow}>
-                  <span class={styles.infoLabel}>Modo do Sistema</span>
-                  <span class={styles.infoValue} style={{ "text-transform": "uppercase", color: "var(--success)" }}>{s().operacao.modo_atual}</span>
-                </div>
-                <div class={styles.infoRow}>
-                  <span class={styles.infoLabel}>Canais Ativos</span>
-                  <span class={styles.infoValue} style={{ "font-size": "12px" }}>
-                    {!s().operacao.saidas_ativas || s().operacao.saidas_ativas.length === 0 ? "Nenhum" : s().operacao.saidas_ativas.join(", ")}
+                  <span class={styles.infoLabel}>Conexão ao Backend</span>
+                  <span class={styles.infoValue} style={{ color: backendOnline() ? "var(--success)" : "var(--danger)" }}>
+                    {connectionState() === "connected" ? "Online" : connectionState() === "connecting" ? "Conectando" : "Offline"}
                   </span>
                 </div>
               </div>
-            </div>
+            </section>
 
-            {/* Sensores Ambientais */}
-            <div class={`${styles.card} ${styles.span1}`}>
-              <div class={styles.cardTop}><Thermometer size={16} /> Temperatura</div>
-              <div class={styles.cardValue}>
-                {s().sensores.clima.temperatura_c.toFixed(1)}<span class={styles.cardUnit}>°C</span>
-              </div>
-            </div>
-
-            <div class={`${styles.card} ${styles.span1}`}>
-              <div class={styles.cardTop}><Droplets size={16} /> Umidade do Ar</div>
-              <div class={styles.cardValue}>
-                {s().sensores.clima.umidade_pct.toFixed(1)}<span class={styles.cardUnit}>%</span>
-              </div>
-            </div>
-
-            <div class={`${styles.card} ${styles.span1}`}>
-              <div class={styles.cardTop}><CloudRain size={16} /> Pressão barométrica</div>
-              <div class={styles.cardValue}>
-                {s().sensores.clima.pressao_hpa.toFixed(1)}<span class={styles.cardUnit}>hPa</span>
-              </div>
-            </div>
-
-            {/* Detector de Fluxo */}
-            <div class={`${styles.card} ${styles.span1}`}>
-              <div class={styles.cardTop}><Activity size={16} /> Fluxo Hidráulico</div>
-              <div class={styles.cardValue} style={{ color: s().sensores.hidraulica.fluxo_detectado ? "var(--success)" : "inherit" }}>
-                {s().sensores.hidraulica.fluxo_detectado ? "ATIVO" : "NULO"}
-                <span class={styles.cardUnit}>{s().sensores.hidraulica.vazao_lpm.toFixed(1)} L/m</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* GRÁFICOS DE TELEMETRIA CANVAS */}
-        <section class={styles.sectionWrapper} style={{ "margin-top": "24px" }}>
-          <div class={styles.sectionHeader}>
-            <Activity size={20} />
-            Gráfico de Histórico e Tendências (Tempo Real)
-          </div>
-          <div class={styles.card} style={{ width: "100%", padding: "20px" }}>
-            <div style={{ display: "flex", gap: "20px", "font-size": "13px", "font-weight": "600", "margin-bottom": "8px" }}>
-              <span style={{ color: "#ff7a00" }}>● Temperatura (°C)</span>
-              <span style={{ color: "#007aff" }}>● Umidade do Ar (%)</span>
-            </div>
-            <div class={styles.chartContainer}>
-              <canvas ref={canvasRef} class={styles.chartCanvas}></canvas>
-            </div>
-          </div>
-        </section>
-      </Show>
-
-      {/* ─── ABA 2: CONTROLE & AGENDA ─────────────────────── */}
-      <Show when={activeTab() === "controle"}>
-        <div style={{ display: "grid", "grid-template-columns": "repeat(2, 1fr)", gap: "24px" }}>
-          {/* Telecomando Manual */}
-          <section class={styles.sectionWrapper}>
-            <div class={styles.sectionHeader}>
-              <Power size={20} />
-              Telecomando Manual
-              <Show when={sending()}><Loader2 size={16} class={styles.spin} style={{ "margin-left": "8px" }} /></Show>
-            </div>
-
-            <div class={styles.card}>
-              <div class={styles.actionGroup}>
-                <div class={styles.actionTitle}>Irrigação</div>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Conjunto de válvulas - Bag 1</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_1}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.irrigacao.conjunto_1;
-                        confirmToggle("Irrigação do Conjunto Bag 1", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_1: checked } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Conjunto de válvulas - Bag 2</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_2}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.irrigacao.conjunto_2;
-                        confirmToggle("Irrigação do Conjunto Bag 2", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_2: checked } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-              </div>
-
-              <div class={styles.actionGroup} style={{ "margin-bottom": "0" }}>
-                <div class={styles.actionTitle}>Fertirrigação Soluções</div>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação Ativa - Solução 1 Bag 1</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_1}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.adubacao.solucao_1.bag_1;
-                        confirmToggle("Adubação com Solução 1 no Bag 1", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_1: checked } } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação Ativa - Solução 1 Bag 2</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_2}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.adubacao.solucao_1.bag_2;
-                        confirmToggle("Adubação com Solução 1 no Bag 2", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_2: checked } } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação Ativa - Solução 2 Bag 1</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_1}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.adubacao.solucao_2.bag_1;
-                        confirmToggle("Adubação com Solução 2 no Bag 1", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_1: checked } } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação Ativa - Solução 2 Bag 2</span>
-                  <div class={styles.toggle}>
-                    <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_2}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        const checked = !c().telecomando.adubacao.solucao_2.bag_2;
-                        confirmToggle("Adubação com Solução 2 no Bag 2", !checked, () => {
-                          updateControl((prev) => ({
-                            ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_2: checked } } }
-                          }));
-                        });
-                      }} />
-                    <span class={styles.slider}></span>
-                  </div>
-                </label>
-              </div>
-            </div>
-          </section>
-
-          {/* Sincronização de Agenda Local */}
-          <section class={styles.sectionWrapper}>
-            <div class={styles.sectionHeader}>
-              <Calendar size={20} />
-              Sincronização de Agenda Local
-            </div>
-            <div class={styles.card}>
-              <div class={styles.actionGroup}>
-                <div class={styles.actionTitle}>Horários de Irrigação</div>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Válvulas Bag 1</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.irrigacao.conjunto_1}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, irrigacao: { ...prev.agendamento.irrigacao, conjunto_1: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Válvulas Bag 2</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.irrigacao.conjunto_2}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, irrigacao: { ...prev.agendamento.irrigacao, conjunto_2: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-              </div>
-
-              <div class={styles.actionGroup} style={{ "margin-bottom": "0" }}>
-                <div class={styles.actionTitle}>Programação de Fertirrigação</div>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação com Solução 1 Bag 1</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_1_bag_1}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_1_bag_1: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação com Solução 1 Bag 2</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_1_bag_2}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_1_bag_2: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação com Solução 2 Bag 1</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_2_bag_1}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_2_bag_1: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-                <label class={styles.switchRow}>
-                  <span class={styles.switchLabel}>Adubação com Solução 2 Bag 2</span>
-                  <div class={styles.timeWrapper}>
-                    <Clock size={16} />
-                    <input type="time" class={styles.timeInput} value={c().agendamento.adubacao.sol_2_bag_2}
-                      onInput={(e) => updateControl((prev) => ({
-                        ...prev, agendamento: { ...prev.agendamento, adubacao: { ...prev.agendamento.adubacao, sol_2_bag_2: e.currentTarget.value } }
-                      }))} />
-                  </div>
-                </label>
-              </div>
-            </div>
-          </section>
-        </div>
-      </Show>
-
-      {/* ─── ABA 3: ALARMES OPERACIONAIS ─────────────────── */}
-      <Show when={activeTab() === "alarmes"}>
-        <section class={styles.sectionWrapper}>
-          <div class={styles.sectionHeader}>
-            <AlertTriangle size={20} />
-            Supervisão de Alarmes
-          </div>
-          <div class={styles.card} style={{ "min-height": "320px" }}>
-            <div class={styles.actionTitle}>Alarmes Ativos no Dispositivo</div>
-            
-            <Show
-              when={alarms().length > 0}
-              fallback={
-                <div class={styles.noAlarms}>
-                  <CheckCircle size={16} />
-                  <span>Nenhum alarme operacional ativo. Sensor seguro.</span>
+            <section class={styles.panel}>
+              <div class={styles.panelHead}><Settings2 size={16} /> Operação Hidráulica</div>
+              <div class={styles.panelBody}>
+                <div class={styles.infoRow}>
+                  <span class={styles.infoLabel}>Modo do Sistema</span>
+                  <span class={styles.infoValue} style={{ "text-transform": "uppercase", color: "var(--accent)" }}>
+                    {s().operacao.modo_atual}
+                  </span>
                 </div>
-              }
-            >
-              <div class={styles.alarmList}>
-                <For each={alarms()}>
-                  {(alarm: IAlarmEvent) => {
-                    const severity = () => alarm.rule_severity || "info";
-                    return (
-                    <div class={`${styles.alarmItem} ${styles[severity()] ?? ""}`}>
-                      <div class={styles.alarmInfo}>
-                        <span class={styles.alarmRuleName}>{alarm.rule_name}</span>
-                        <span class={styles.alarmMeta}>
-                          Disparado em: {new Date(alarm.triggered_at).toLocaleTimeString()} · Severidade: {severity().toUpperCase()}
-                        </span>
-                      </div>
-                      <button class={styles.alarmAckBtn} onClick={() => handleAckAlarm(alarm.id)}>
-                        Reconhecer
-                      </button>
-                    </div>
-                    );
-                  }}
-                </For>
-              </div>
-            </Show>
-          </div>
-        </section>
-      </Show>
-
-      {/* ─── ABA 4: HISTÓRICO (COLETA DE DADOS) ──────────── */}
-      <Show when={activeTab() === "historico"}>
-        <section class={styles.sectionWrapper}>
-          <div class={styles.sectionHeader}>
-            <FileText size={20} />
-            Histórico de Coleta de Telemetria
-          </div>
-          <div class={styles.card} style={{ "min-height": "420px" }}>
-            <div class={styles.actionTitle}>
-              Leituras dos Sensores Enviadas pelo ESP32 (mais recentes primeiro)
-              <Show when={histLoading()}><Loader2 size={14} class={styles.spin} style={{ "margin-left": "8px" }} /></Show>
-            </div>
-
-            <Show
-              when={histRecords().length > 0}
-              fallback={
-                <div class={styles.noAlarms}>
-                  <Activity size={16} />
-                  <span>Nenhuma leitura coletada ainda. Aguardando telemetria do ESP32.</span>
+                <div class={styles.infoRow}>
+                  <span class={styles.infoLabel}>Canais Ativos</span>
+                  <span class={styles.infoValue} style={{ "font-size": "13px" }}>
+                    {!s().operacao.saidas_ativas || s().operacao.saidas_ativas.length === 0 ? "Nenhum" : s().operacao.saidas_ativas.join(", ")}
+                  </span>
                 </div>
-              }
-            >
-              <div class={styles.dataTableWrap}>
-                <table class={styles.dataTable}>
-                  <thead>
-                    <tr>
-                      <th>Horário</th>
-                      <th>Temp. (°C)</th>
-                      <th>Umidade (%)</th>
-                      <th>Pressão (hPa)</th>
-                      <th>Fluxo</th>
-                      <th>Vazão (L/m)</th>
-                      <th>Wi-Fi (dBm)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <For each={histRecords()}>
-                      {(rec: ITelemetryRecord) => (
-                        <tr>
-                          <td>{new Date(rec.recorded_at).toLocaleString()}</td>
-                          <td>{rec.temperatura_c.toFixed(1)}</td>
-                          <td>{rec.umidade_pct.toFixed(1)}</td>
-                          <td>{rec.pressao_hpa.toFixed(1)}</td>
-                          <td class={rec.fluxo_detectado ? styles.flowYes : styles.flowNo}>
-                            {rec.fluxo_detectado ? "ATIVO" : "—"}
-                          </td>
-                          <td>{rec.vazao_lpm.toFixed(1)}</td>
-                          <td>{rec.sinal_wifi_dbm}</td>
-                        </tr>
-                      )}
-                    </For>
-                  </tbody>
-                </table>
+                <div class={styles.infoRow}>
+                  <span class={styles.infoLabel}>Detector de Fluxo</span>
+                  <span class={styles.infoValue} style={{ color: s().sensores.hidraulica.fluxo_detectado ? "var(--success)" : "var(--text-muted)" }}>
+                    {s().sensores.hidraulica.fluxo_detectado ? "ATIVO" : "NULO"}
+                  </span>
+                </div>
+                <div class={styles.infoRow}>
+                  <span class={styles.infoLabel}>Identificador do Dispositivo</span>
+                  <span class={styles.infoValue}>{DEVICE_ID}</span>
+                </div>
               </div>
+            </section>
+          </div>
+        </Show>
 
-              <div class={styles.pagination}>
-                <span class={styles.paginationInfo}>
-                  {histTotal()} leituras · Página {histPage()} de {histTotalPages()}
-                </span>
-                <div class={styles.paginationControls}>
-                  <button
-                    class={styles.pageBtn}
-                    disabled={histPage() <= 1 || histLoading()}
-                    onClick={() => loadHistoryPage(histPage() - 1)}
+        {/* Schedule Modal */}
+        <Show when={showScheduleModal()}>
+          <div class={styles.modalOverlay} onClick={() => setShowScheduleModal(false)}>
+            <div class={styles.modalContent} onClick={(e) => e.stopPropagation()} style={{ "max-width": "480px", "text-align": "left", "align-items": "stretch" }}>
+              <h3 class={styles.modalTitle}>{editingSchedule() ? 'Editar Agendamento' : 'Novo Agendamento'}</h3>
+              <form onSubmit={handleScheduleSubmit} style={{ display: "flex", "flex-direction": "column", gap: "16px", "margin-top": "16px" }}>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <label class={styles.formLabel}>Nome</label>
+                  <input
+                    type="text"
+                    class={styles.formInput}
+                    value={scheduleForm().name}
+                    onInput={(e) => setScheduleForm(prev => ({ ...prev, name: e.currentTarget.value }))}
+                    required
+                    placeholder="Ex: Irrigação Manhã"
+                  />
+                </div>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <label class={styles.formLabel}>Válvula</label>
+                  <select
+                    class={styles.formInput}
+                    value={scheduleForm().valve_number}
+                    onChange={(e) => setScheduleForm(prev => ({ ...prev, valve_number: parseInt(e.currentTarget.value) }))}
                   >
-                    <ChevronLeft size={16} /> Anterior
+                    <option value={1}>Válvula 1</option>
+                    <option value={2}>Válvula 2</option>
+                    <option value={3}>Válvula 3</option>
+                    <option value={4}>Válvula 4</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <label class={styles.formLabel}>Tipo</label>
+                  <select
+                    class={styles.formInput}
+                    value={scheduleForm().schedule_type}
+                    onChange={(e) => setScheduleForm(prev => ({ ...prev, schedule_type: e.currentTarget.value }))}
+                  >
+                    <option value="one_time">Único</option>
+                    <option value="recurring">Recorrente</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <label class={styles.formLabel}>Data/Hora de Início</label>
+                  <input
+                    type="datetime-local"
+                    class={styles.formInput}
+                    value={scheduleForm().start_at}
+                    onInput={(e) => setScheduleForm(prev => ({ ...prev, start_at: e.currentTarget.value }))}
+                  />
+                </div>
+                <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+                  <label class={styles.formLabel}>Duração (minutos)</label>
+                  <input
+                    type="number"
+                    class={styles.formInput}
+                    min="1"
+                    max="480"
+                    value={Math.floor(scheduleForm().duration_sec / 60)}
+                    onInput={(e) => setScheduleForm(prev => ({ ...prev, duration_sec: parseInt(e.currentTarget.value) * 60 }))}
+                    required
+                  />
+                </div>
+                <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                  <input
+                    type="checkbox"
+                    checked={scheduleForm().is_enabled}
+                    onChange={(e) => setScheduleForm(prev => ({ ...prev, is_enabled: e.currentTarget.checked }))}
+                  />
+                  <label class={styles.formLabel}>Ativo</label>
+                </div>
+                <div style={{ display: "flex", gap: "12px", "justify-content": "flex-end", "margin-top": "8px" }}>
+                  <button type="button" class={styles.modalCancelBtn} onClick={() => setShowScheduleModal(false)}>
+                    Cancelar
                   </button>
-                  <button
-                    class={styles.pageBtn}
-                    disabled={histPage() >= histTotalPages() || histLoading()}
-                    onClick={() => loadHistoryPage(histPage() + 1)}
-                  >
-                    Próxima <ChevronRight size={16} />
+                  <button type="submit" class={styles.modalConfirmBtn}>
+                    {editingSchedule() ? 'Atualizar' : 'Criar'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </Show>
+
+        {/* MODAL DE CONFIRMAÇÃO DE CONTROLE */}
+        <Show when={confirmDialog()} keyed>
+          {(dialog) => (
+            <div class={styles.modalOverlay}>
+              <div class={styles.modalContent}>
+                <AlertTriangle size={32} class={styles.modalIcon} />
+                <h3 class={styles.modalTitle}>Confirmar Comando Manual</h3>
+                <p class={styles.modalText}>{dialog.title}</p>
+                <div class={styles.modalActions}>
+                  <button class={styles.modalCancelBtn} onClick={() => setConfirmDialog(null)}>
+                    Cancelar
+                  </button>
+                  <button class={styles.modalConfirmBtn} onClick={() => {
+                    dialog.onConfirm();
+                    setConfirmDialog(null);
+                  }}>
+                    Confirmar
                   </button>
                 </div>
               </div>
-            </Show>
-          </div>
-        </section>
-      </Show>
-
-      {/* MODAL DE CONFIRMAÇÃO DE CONTROLE */}
-      <Show when={confirmDialog()} keyed>
-        {(dialog) => (
-          <div class={styles.modalOverlay}>
-            <div class={styles.modalContent}>
-              <AlertTriangle size={32} class={styles.modalIcon} />
-              <h3 class={styles.modalTitle}>Confirmar Comando Manual</h3>
-              <p class={styles.modalText}>{dialog.title}</p>
-              <div class={styles.modalActions}>
-                <button class={styles.modalCancelBtn} onClick={() => setConfirmDialog(null)}>
-                  Cancelar
-                </button>
-                <button class={styles.modalConfirmBtn} onClick={() => {
-                  dialog.onConfirm();
-                  setConfirmDialog(null);
-                }}>
-                  Confirmar
-                </button>
-              </div>
             </div>
-          </div>
-        )}
-      </Show>
+          )}
+        </Show>
+      </main>
     </div>
   );
 }
