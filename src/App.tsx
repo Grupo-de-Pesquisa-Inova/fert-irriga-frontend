@@ -427,7 +427,7 @@ export default function App() {
     controle: { title: "Controle & Agenda", subtitle: "Telecomando manual e horários locais" },
     alarmes: { title: "Alarmes Operacionais", subtitle: "Supervisão de eventos do dispositivo" },
     historico: { title: "Histórico de Coleta", subtitle: "Leituras de telemetria registradas" },
-    agendamentos: { title: "Agendamentos", subtitle: "Programação de irrigação" },
+    agendamentos: { title: "Agendamentos", subtitle: "Executados no ESP32 (RTC) — funcionam mesmo sem internet" },
     sistema: { title: "Sistema & Dispositivo", subtitle: "Diagnóstico do controlador ESP32" },
   };
 
@@ -993,6 +993,10 @@ export default function App() {
               </button>
             </div>
             <div class={styles.panelBody}>
+              <div class={styles.flowNote} style={{ "margin-top": "0", "margin-bottom": "16px" }}>
+                <Cpu size={14} />
+                <span>Os agendamentos são sincronizados e executados pelo próprio ESP32 (relógio interno), continuando a disparar mesmo se a internet cair.</span>
+              </div>
               <Show
                 when={schedules().length > 0}
                 fallback={
