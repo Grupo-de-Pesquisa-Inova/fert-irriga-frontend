@@ -37,7 +37,8 @@ import { gaugeOption, trendOption, pressureOption, computeVPD, classifyVPD } fro
 import {
   getDevice,
   sendControl,
-  emergencyStop,
+  emergencyReset,
+  createCommand,
   getLatestTelemetry,
   getTelemetryHistory,
   listActiveAlarms,
@@ -105,6 +106,7 @@ export default function App() {
   // `conexao.estado` autodeclarado pelo próprio ESP (que congela em "online").
   const [deviceOnline, setDeviceOnline] = createSignal(false);
   const [sending, setSending] = createSignal(false);
+  const [controlError, setControlError] = createSignal<string | null>(null);
   const [activeTab, setActiveTab] = createSignal<Tab>("painel");
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [showVpdInfo, setShowVpdInfo] = createSignal(false);
@@ -248,27 +250,69 @@ export default function App() {
 
   // ─── Enviar controle ao backend ────────────────────
   async function handleControlChange(newControl: IControlStatus) {
-    setSysData((prev: IPayloadESP32) => ({ ...prev, controle: newControl }));
-
-    if (!backendOnline()) return;
-
+    if (!backendOnline()) {
+      setControlError("Backend offline. Comando não enviado.");
+      return;
+    }
     setSending(true);
+    setControlError(null);
     try {
       await sendControl(DEVICE_ID, newControl);
     } catch (err) {
       console.error("[API] Erro ao enviar controle:", err);
+      setControlError(err instanceof Error ? err.message : "Erro ao enviar comando.");
     } finally {
       setSending(false);
     }
   }
 
-  // ─── Parada de Emergência ─────────────────────────
-  async function handleEmergencyStop() {
+  const controlsDisabled = () =>
+    sending() || !backendOnline() || !isOnline() || sysData().seguranca.parada_emergencia;
+
+  async function sendValveCommand(targetChannel: string, desiredState: boolean) {
+    if (controlsDisabled()) {
+      setControlError("Controle bloqueado: verifique backend, ESP32 e parada de emergência.");
+      return;
+    }
+
+    setSending(true);
+    setControlError(null);
     try {
-      await emergencyStop(DEVICE_ID);
-      fetchAllData();
+      await createCommand({
+        device_id: DEVICE_ID,
+        action: desiredState ? "open_valve" : "close_valve",
+        target_channel: targetChannel,
+        origin: "web_manual",
+        actor: "operator",
+      });
+      window.setTimeout(fetchAllData, 1200);
     } catch (err) {
-      console.error("[API] Erro na parada de emergência:", err);
+      console.error("[API] Erro ao enviar comando manual:", err);
+      setControlError(err instanceof Error ? err.message : "Erro ao enviar comando manual.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function requestValveToggle(label: string, currentValue: boolean, targetChannel: string) {
+    const nextValue = !currentValue;
+    confirmToggle(label, currentValue, () => {
+      void sendValveCommand(targetChannel, nextValue);
+    });
+  }
+
+  // ─── Parada de Emergência ─────────────────────────
+  async function handleEmergencyReset() {
+    setSending(true);
+    setControlError(null);
+    try {
+      await emergencyReset(DEVICE_ID);
+      window.setTimeout(fetchAllData, 800);
+    } catch (err) {
+      console.error("[API] Erro ao resetar emergência:", err);
+      setControlError(err instanceof Error ? err.message : "Erro ao resetar emergência.");
+    } finally {
+      setSending(false);
     }
   }
 
@@ -375,6 +419,7 @@ export default function App() {
   // Helper para atualizar controle
   function updateControl(updater: (prev: IControlStatus) => IControlStatus) {
     const newControl = updater(sysData().controle);
+    setSysData((prev: IPayloadESP32) => ({ ...prev, controle: newControl }));
     handleControlChange(newControl);
   }
 
@@ -519,7 +564,7 @@ export default function App() {
           <div class={styles.alert}>
             <AlertTriangle size={18} />
             <span>PARADA DE EMERGÊNCIA ATIVA — ATUADORES BLOQUEADOS POR SEGURANÇA</span>
-            <button class={styles.emergencyResetBtn} onClick={handleEmergencyStop} disabled={sending()}>
+            <button class={styles.emergencyResetBtn} onClick={handleEmergencyReset} disabled={sending()}>
               RESETAR SISTEMA
             </button>
           </div>
@@ -691,15 +736,10 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Válvula 1</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_1}
+                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_1} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.irrigacao.conjunto_1;
-                          confirmToggle("Irrigação Válvula 1", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_1: checked } }
-                            }));
-                          });
+                          requestValveToggle("Irrigação Válvula 1", c().telecomando.irrigacao.conjunto_1, "irrigacao_conj1");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
@@ -707,15 +747,10 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Válvula 2</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_2}
+                      <input type="checkbox" checked={c().telecomando.irrigacao.conjunto_2} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.irrigacao.conjunto_2;
-                          confirmToggle("Irrigação Válvula 2", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, irrigacao: { ...prev.telecomando.irrigacao, conjunto_2: checked } }
-                            }));
-                          });
+                          requestValveToggle("Irrigação Válvula 2", c().telecomando.irrigacao.conjunto_2, "irrigacao_conj2");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
@@ -727,15 +762,10 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Solução 1 - Válvula 1</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_1}
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_1} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.adubacao.solucao_1.bag_1;
-                          confirmToggle("Adubação Solução 1 Válvula 1", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_1: checked } } }
-                            }));
-                          });
+                          requestValveToggle("Adubação Solução 1 Válvula 1", c().telecomando.adubacao.solucao_1.bag_1, "adubacao_sol1_bag1");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
@@ -743,15 +773,10 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Solução 1 - Válvula 2</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_2}
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_1.bag_2} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.adubacao.solucao_1.bag_2;
-                          confirmToggle("Adubação Solução 1 Válvula 2", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_1: { ...prev.telecomando.adubacao.solucao_1, bag_2: checked } } }
-                            }));
-                          });
+                          requestValveToggle("Adubação Solução 1 Válvula 2", c().telecomando.adubacao.solucao_1.bag_2, "adubacao_sol1_bag2");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
@@ -759,15 +784,10 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Solução 2 - Válvula 1</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_1}
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_1} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.adubacao.solucao_2.bag_1;
-                          confirmToggle("Adubação Solução 2 Válvula 1", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_1: checked } } }
-                            }));
-                          });
+                          requestValveToggle("Adubação Solução 2 Válvula 1", c().telecomando.adubacao.solucao_2.bag_1, "adubacao_sol2_bag1");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
@@ -775,20 +795,27 @@ export default function App() {
                   <label class={styles.switchRow}>
                     <span class={styles.switchLabel}>Solução 2 - Válvula 2</span>
                     <div class={styles.toggle}>
-                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_2}
+                      <input type="checkbox" checked={c().telecomando.adubacao.solucao_2.bag_2} disabled={controlsDisabled()}
                         onClick={(e) => {
                           e.preventDefault();
-                          const checked = !c().telecomando.adubacao.solucao_2.bag_2;
-                          confirmToggle("Adubação Solução 2 Válvula 2", !checked, () => {
-                            updateControl((prev) => ({
-                              ...prev, telecomando: { ...prev.telecomando, adubacao: { ...prev.telecomando.adubacao, solucao_2: { ...prev.telecomando.adubacao.solucao_2, bag_2: checked } } }
-                            }));
-                          });
+                          requestValveToggle("Adubação Solução 2 Válvula 2", c().telecomando.adubacao.solucao_2.bag_2, "adubacao_sol2_bag2");
                         }} />
                       <span class={styles.slider}></span>
                     </div>
                   </label>
                 </div>
+                <Show when={controlError()}>
+                  <div class={styles.controlError}>
+                    <AlertTriangle size={14} />
+                    <span>{controlError()}</span>
+                  </div>
+                </Show>
+                <Show when={controlsDisabled() && !controlError()}>
+                  <div class={styles.flowNote}>
+                    <Info size={14} />
+                    <span>Controle manual indisponível enquanto backend, ESP32 ou segurança não estiverem liberados.</span>
+                  </div>
+                </Show>
               </div>
             </section>
 

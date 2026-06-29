@@ -188,6 +188,8 @@ export const sendControl = (id: string, control: IControlStatus) =>
   request<{ status: string }>(`/devices/${id}/control`, { method: "POST", body: JSON.stringify(control) });
 export const emergencyStop = (id: string) =>
   request<{ status: string }>(`/devices/${id}/emergency-stop`, { method: "POST" });
+export const emergencyReset = (id: string) =>
+  request<{ status: string }>(`/devices/${id}/emergency-reset`, { method: "POST" });
 
 // ─── Telemetry ─────────────────────────────────────────
 
@@ -244,7 +246,14 @@ export const listScheduleRuns = (id: string) => request<IScheduleRun[]>(`/schedu
 
 export const listCommands = (deviceId?: string) =>
   request<IManualCommand[]>(`/commands${deviceId ? `?device_id=${deviceId}` : ""}`);
-export const createCommand = (data: { device_id: string; action: string; target_channel?: string }) =>
+export const createCommand = (data: {
+  device_id: string;
+  action: string;
+  target_channel: string;
+  parameters?: Record<string, unknown>;
+  origin?: string;
+  actor?: string;
+}) =>
   request<IManualCommand>("/commands", { method: "POST", body: JSON.stringify(data) });
 
 // ─── Alarms ────────────────────────────────────────────
