@@ -336,6 +336,23 @@ export default function App() {
     }
   }
 
+  // datetime-local inputs use "YYYY-MM-DDTHH:mm" (sem segundos/timezone),
+  // mas o backend espera RFC3339 (*time.Time) — sem isso o decode falha com 400.
+  function toDatetimeLocalValue(iso: string | null): string {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function fromDatetimeLocalValue(value: string): string | null {
+    if (!value) return null;
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  }
+
   function resetScheduleForm() {
     setEditingSchedule(null);
     setScheduleForm({
@@ -354,7 +371,7 @@ export default function App() {
       name: schedule.name,
       valve_number: schedule.valve_number,
       schedule_type: schedule.schedule_type,
-      start_at: schedule.start_at ?? '',
+      start_at: toDatetimeLocalValue(schedule.start_at),
       duration_sec: schedule.duration_sec,
       is_enabled: schedule.is_enabled,
     });
@@ -366,12 +383,13 @@ export default function App() {
     const form = scheduleForm();
     const editing = editingSchedule();
     try {
+      const start_at = fromDatetimeLocalValue(form.start_at);
       if (editing) {
         await updateSchedule(editing.id, {
           name: form.name,
           valve_number: form.valve_number,
           schedule_type: form.schedule_type,
-          start_at: form.start_at || null,
+          start_at,
           duration_sec: form.duration_sec,
           is_enabled: form.is_enabled,
         });
@@ -380,7 +398,7 @@ export default function App() {
           name: form.name,
           valve_number: form.valve_number,
           schedule_type: form.schedule_type,
-          start_at: form.start_at || null,
+          start_at,
           duration_sec: form.duration_sec,
           is_enabled: form.is_enabled,
         });
@@ -1185,7 +1203,10 @@ export default function App() {
                     min="1"
                     max="480"
                     value={Math.floor(scheduleForm().duration_sec / 60)}
-                    onInput={(e) => setScheduleForm(prev => ({ ...prev, duration_sec: parseInt(e.currentTarget.value) * 60 }))}
+                    onInput={(e) => {
+                      const minutes = parseInt(e.currentTarget.value);
+                      setScheduleForm(prev => ({ ...prev, duration_sec: isNaN(minutes) ? 0 : minutes * 60 }));
+                    }}
                     required
                   />
                 </div>
