@@ -228,6 +228,16 @@ export default function App() {
         return next;
       });
     },
+    onEvent: (type, data) => {
+      // Eventos tipados (device_event, command_status, emergency, alarmes) —
+      // hoje só usamos para refrescar alarmes na hora em vez de esperar o poll de 5s.
+      if (type === "alarm_triggered" || type === "alarm_resolved" || type === "emergency") {
+        listActiveAlarms()
+          .then((data) => setAlarms(data ?? []))
+          .catch((err) => console.warn("[API] Erro ao buscar alarmes:", err));
+      }
+      console.debug("[WS] Evento:", type, data);
+    },
   });
 
   createEffect(() => {

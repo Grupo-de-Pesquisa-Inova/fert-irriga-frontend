@@ -12,6 +12,7 @@ export type ConnectionState = "connecting" | "connected" | "disconnected";
 interface UseDeviceWebSocketOptions {
   deviceID: string;
   onPayload?: (payload: IPayloadESP32) => void;
+  onEvent?: (type: string, data: unknown) => void;
   autoReconnect?: boolean;
   reconnectInterval?: number;
 }
@@ -48,8 +49,14 @@ export function createDeviceWebSocket(opts: UseDeviceWebSocketOptions) {
     ws.onmessage = (event) => {
       if (!mounted) return;
       try {
-        const payload: IPayloadESP32 = JSON.parse(event.data);
-        opts.onPayload?.(payload);
+        const msg = JSON.parse(event.data);
+        // Eventos tipados (device_event, command_status, emergency, alarmes)
+        // vêm como {type, data}; telemetria bruta vem como IPayloadESP32 direto.
+        if (msg && typeof msg === "object" && "type" in msg && "data" in msg) {
+          opts.onEvent?.(msg.type, msg.data);
+        } else {
+          opts.onPayload?.(msg as IPayloadESP32);
+        }
       } catch (err) {
         console.warn("[WS] Payload inválido:", err);
       }
