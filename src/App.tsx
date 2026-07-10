@@ -87,7 +87,7 @@ const DEFAULT_PAYLOAD: IPayloadESP32 = {
       },
     },
   },
-  seguranca: { parada_emergencia: false, alerta_falha_fluxo: false },
+  seguranca: { parada_emergencia: false, alerta_falha_fluxo: false, relogio_dessincronizado: false },
 };
 
 // ─── Helpers ───────────────────────────────────────────

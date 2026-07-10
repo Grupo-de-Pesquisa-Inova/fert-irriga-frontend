@@ -59,6 +59,7 @@ export interface IControlStatus {
 export interface ISecurityStatus {
   parada_emergencia: boolean;
   alerta_falha_fluxo: boolean;
+  relogio_dessincronizado: boolean;
 }
 
 export interface IPayloadESP32 {
