@@ -14,6 +14,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(body.error || `HTTP ${res.status}`);
   }
 
+  // 204 No Content (ex.: DELETE) não tem corpo — res.json() lançaria ao
+  // tentar parsear uma string vazia.
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
   return res.json();
 }
 
