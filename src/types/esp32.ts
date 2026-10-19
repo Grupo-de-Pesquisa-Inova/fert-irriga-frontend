@@ -63,6 +63,7 @@ export interface ISecurityStatus {
 }
 
 export interface IPayloadESP32 {
+  capabilities?: string[];
   status_sistema: ISystemStatus;
   controle: IControlStatus;
   seguranca: ISecurityStatus;

@@ -87,7 +87,8 @@
 /* ═══════════════════════════════════════════════════ */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { font-size: 15px; }
+/* Reserva a barra de rolagem: travar o scroll ao abrir modais não desloca a página. */
+html { font-size: 15px; scrollbar-gutter: stable; }
 
 body {
   font-family: var(--font-sans);

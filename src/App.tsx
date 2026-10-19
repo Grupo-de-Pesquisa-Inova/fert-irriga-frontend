@@ -5,6 +5,7 @@ import {
   Droplets,
   CloudRain,
   Activity,
+  Play,
   Moon,
   Sun,
   AlertTriangle,
@@ -33,6 +34,9 @@ import type { IPayloadESP32, IControlStatus } from "./types/esp32";
 import { createDeviceWebSocket, type ConnectionState } from "./hooks/useDeviceWebSocket";
 import { EChart } from "./components/EChart";
 import { Sparkline } from "./components/Sparkline";
+import Scenarios from "./components/Scenarios";
+import scenarioStyles from "./components/Scenarios.module.css";
+import { listScenarioRuns, type ScenarioRun } from "./services/api";
 import { gaugeOption, trendOption, pressureOption, computeVPD, classifyVPD } from "./lib/charts";
 import {
   getDevice,
@@ -57,7 +61,7 @@ import {
 // ─── Configuração ──────────────────────────────────────
 const DEVICE_ID = import.meta.env.VITE_DEVICE_ID || "esp32-001";
 
-type Tab = "painel" | "controle" | "alarmes" | "historico" | "agendamentos" | "sistema";
+type Tab = "painel" | "controle" | "alarmes" | "historico" | "agendamentos" | "sistema" | "cenarios";
 
 // ─── Estado padrão (fallback quando offline) ───────────
 const DEFAULT_PAYLOAD: IPayloadESP32 = {
@@ -102,6 +106,25 @@ export default function App() {
   const [isDark, setIsDark] = createSignal(true);
   const [sysData, setSysData] = createSignal<IPayloadESP32>(DEFAULT_PAYLOAD);
   const [backendOnline, setBackendOnline] = createSignal(false);
+  const [scenarioRuns, setScenarioRuns] = createSignal<ScenarioRun[]>([]);
+  const [scenariosOnline, setScenariosOnline] = createSignal(false);
+  const [demonstration, setDemonstration] = createSignal(false);
+  const [seenFailures, setSeenFailures] = createSignal<string[]>([]);
+  // Runs arrive newest first. Past failures belong in history; uncertainty remains actionable.
+  const scenarioFailure = () => scenarioRuns().find((r, index) => (r.status === 'uncertain' || (index === 0 && r.status === 'failed')) && !seenFailures().includes(r.id + r.error_code));
+  let loadingScenarioRuns = false;
+  async function refreshScenarioRuns() {
+    if (loadingScenarioRuns) return;
+    loadingScenarioRuns = true;
+    try { setScenarioRuns(await listScenarioRuns(DEVICE_ID)); setScenariosOnline(true); }
+    catch { setScenariosOnline(false); }
+    finally { loadingScenarioRuns = false; }
+  }
+  onMount(() => {
+    void refreshScenarioRuns();
+    const timer = setInterval(() => { void refreshScenarioRuns(); }, 2000);
+    onCleanup(() => clearInterval(timer));
+  });
   // Status real do ESP32 calculado pelo backend (via last_seen), NÃO o campo
   // `conexao.estado` autodeclarado pelo próprio ESP (que congela em "online").
   const [deviceOnline, setDeviceOnline] = createSignal(false);
@@ -174,7 +197,7 @@ export default function App() {
       .then((device) => {
         setSysData(device.payload);
         setBackendOnline(true);
-        setDeviceOnline(device.is_online);
+        setDeviceOnline(device.is_online && !!device.last_seen_at && Date.now() - new Date(device.last_seen_at).getTime() <= 60000);
       })
       .catch(() => {
         console.warn("[API] Backend indisponível — usando estado padrão");
@@ -474,6 +497,9 @@ export default function App() {
 
   // Estado real das 6 saídas físicas do ESP (telecomando).
   const valves = () => {
+    if (sysData().capabilities?.some(c => c === 'scenarios_v1' || c === 'valves_v1')) {
+      return ['VA','VAD1','VAD2','VG','VL13','VL46','VRA1','VRA2','M'].map(label => ({ label, on: s().operacao.saidas_ativas.includes(label) }));
+    }
     const tc = c().telecomando;
     return [
       { label: "Irrigação 1", on: tc.irrigacao.conjunto_1 },
@@ -488,6 +514,7 @@ export default function App() {
   // ─── Navegação ────────────────────────────────────
   const navItems: { id: Tab; label: string; icon: any }[] = [
     { id: "painel", label: "Painel", icon: LayoutDashboard },
+    { id: "cenarios", label: "Cenários", icon: Waves },
     { id: "controle", label: "Controle & Agenda", icon: Power },
     { id: "alarmes", label: "Alarmes", icon: AlertTriangle },
     { id: "historico", label: "Histórico", icon: FileText },
@@ -496,6 +523,7 @@ export default function App() {
   ];
 
   const pageMeta: Record<Tab, { title: string; subtitle: string }> = {
+    cenarios: { title: "Cenários de irrigação", subtitle: "Planeje, visualize e acompanhe sua estufa." },
     painel: { title: "Painel da Estufa", subtitle: "Telemetria crucial em tempo real" },
     controle: { title: "Controle & Agenda", subtitle: "Telecomando manual e horários locais" },
     alarmes: { title: "Alarmes Operacionais", subtitle: "Supervisão de eventos do dispositivo" },
@@ -505,6 +533,7 @@ export default function App() {
   };
 
   function goTo(tab: Tab) {
+    if (tab !== activeTab()) setDemonstration(false);
     setActiveTab(tab);
     setSidebarOpen(false);
   }
@@ -518,7 +547,7 @@ export default function App() {
   );
 
   return (
-    <div class={styles.app}>
+    <div class={`${styles.app} ${activeTab() === 'cenarios' ? scenarioStyles.scenarioShell : ''}`}>
       {/* ─── SIDEBAR LATERAL ──────────────────────────── */}
       <Show when={sidebarOpen()}>
         <div class={styles.backdrop} onClick={() => setSidebarOpen(false)} />
@@ -582,10 +611,18 @@ export default function App() {
             <h1 class={styles.pageTitle}>{pageMeta[activeTab()].title}</h1>
             <p class={styles.pageSubtitle}>{pageMeta[activeTab()].subtitle}</p>
           </div>
+          <Show when={activeTab() === 'cenarios'}>
+            <div class={`${scenarioStyles.segment} ${scenarioStyles.headerModes}`} role="group" aria-label="Modo de visualização">
+              <button aria-pressed={!demonstration()} onClick={() => setDemonstration(false)}><Activity size={14} /> Ao vivo</button>
+              <button aria-pressed={demonstration()} onClick={() => setDemonstration(true)}><Play size={14} /> Demonstração</button>
+            </div>
+          </Show>
           <Show when={sending()}>
             <div class={styles.savingChip}><Loader2 size={14} class={styles.spin} /> Enviando…</div>
           </Show>
         </header>
+        {/* Em Cenários vira toast para não deslocar o modelo 3D e o painel. */}
+        <Show when={scenarioFailure()}>{failure => <div class={activeTab() === 'cenarios' ? `${scenarioStyles.toasts} ${scenarioStyles.toastsTop}` : undefined}><div class={scenarioStyles.warning} role="alert"><AlertTriangle size={17} /><div><strong>{failure().status === 'uncertain' ? 'Execução sem confirmação' : 'Falha registrada'}</strong><p>{failure().message || 'Uma execução precisa de atenção.'}</p></div><button onClick={() => { goTo('cenarios'); document.getElementById('scenario-history')?.click(); }}>Ver histórico</button><button aria-label="Dispensar aviso desta execução" onClick={() => setSeenFailures(v => [...v, failure().id + failure().error_code])}>×</button></div></div>}</Show>
 
         {/* PARADA DE EMERGÊNCIA (Sempre Visível) */}
         <Show when={sysData().seguranca.parada_emergencia}>
@@ -707,7 +744,7 @@ export default function App() {
             <div class={styles.panel}>
               <div class={styles.panelHead}>
                 <Power size={16} /> Estado Hidráulico
-                <span class={styles.panelHint}>{valves().filter((v) => v.on).length}/6 ativas</span>
+                <span class={styles.panelHint}>{valves().filter((v) => v.on).length}/{valves().length} ativas</span>
               </div>
               <div class={styles.panelBody}>
                 <div class={styles.valveGrid}>
@@ -727,7 +764,7 @@ export default function App() {
                 </div>
                 <div class={styles.flowNote}>
                   <Waves size={14} />
-                  <span>Fluxo / vazão: <strong>sem sensor no ESP32</strong></span>
+                  <span>Fluxo / vazão: <strong>{!isOnline() ? 'sem telemetria atual' : s().sensores.hidraulica.fluxo_detectado ? `${s().sensores.hidraulica.vazao_lpm.toFixed(1)} L/min` : 'sem fluxo informado'}</strong></span>
                 </div>
               </div>
             </div>
@@ -750,8 +787,20 @@ export default function App() {
           </div>
         </Show>
 
+        <Show when={activeTab() === 'cenarios'}>
+          <Scenarios device={DEVICE_ID} online={deviceOnline()} backend={scenariosOnline()}
+            supported={sysData().capabilities?.includes('scenarios_v1') ?? false}
+            valveSupported={sysData().capabilities?.includes('valves_v1') ?? false}
+            outputs={sysData().status_sistema.operacao.saidas_ativas} runs={scenarioRuns()} refresh={refreshScenarioRuns}
+            flow={sysData().status_sistema.sensores.hidraulica.fluxo_detectado}
+            demonstration={demonstration()} onDemonstrationChange={setDemonstration} emergency={sysData().seguranca.parada_emergencia} />
+        </Show>
+
         {/* ─── PÁGINA 2: CONTROLE & AGENDA ────────────── */}
-        <Show when={activeTab() === "controle"}>
+        <Show when={activeTab() === 'controle' && sysData().capabilities?.some(c => c === 'scenarios_v1' || c === 'valves_v1')}>
+          <div class={scenarioStyles.panel}><h2>Controle por cenário hidráulico</h2><p>Este controlador usa as válvulas e a bomba do modelo da estufa. Selecione uma combinação completa na aba Cenários.</p><button onClick={() => goTo('cenarios')}>Abrir Cenários</button></div>
+        </Show>
+        <Show when={activeTab() === "controle" && !sysData().capabilities?.some(c => c === 'scenarios_v1' || c === 'valves_v1')}>
           <div class={styles.twoCol}>
             {/* Telecomando Manual */}
             <section class={styles.panel}>
@@ -1036,6 +1085,7 @@ export default function App() {
 
         {/* ─── PÁGINA 5: AGENDAMENTOS ─────────────────── */}
         <Show when={activeTab() === "agendamentos"}>
+          <div class={scenarioStyles.warning}><Calendar size={18}/><span>Os cenários do modelo 3D têm horários, duração e histórico próprios na aba Cenários.</span><button onClick={() => goTo('cenarios')}>Agendar cenário</button></div>
           <section class={styles.panel}>
             <div class={styles.panelHead}>
               <Calendar size={16} /> Agendamentos de Irrigação

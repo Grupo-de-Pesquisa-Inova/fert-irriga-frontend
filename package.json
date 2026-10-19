@@ -12,9 +12,11 @@
     "@solidjs/router": "^0.15.3",
     "echarts": "5.5.1",
     "lucide-solid": "^0.469.0",
-    "solid-js": "^1.9.5"
+    "solid-js": "^1.9.5",
+    "three": "^0.186.1"
   },
   "devDependencies": {
+    "@types/three": "^0.186.0",
     "typescript": "^5.5.3",
     "vite": "^5.4.1",
     "vite-plugin-solid": "^2.11.6"

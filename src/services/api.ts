@@ -5,6 +5,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "";
 // ─── Generic Request ───────────────────────────────────
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}/api/v1${path}`, {
+    signal: AbortSignal.timeout(10000),
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -132,6 +133,7 @@ export interface IManualCommand {
   dispatched_at: string | null;
   acked_at: string | null;
   created_at: string;
+  result?: { message?: string; state?: boolean; target?: string };
 }
 
 export interface IAlarmEvent {
@@ -252,6 +254,7 @@ export const listScheduleRuns = (id: string) => request<IScheduleRun[]>(`/schedu
 
 export const listCommands = (deviceId?: string) =>
   request<IManualCommand[]>(`/commands${deviceId ? `?device_id=${deviceId}` : ""}`);
+export const getCommand = (id: string) => request<IManualCommand>(`/commands/${encodeURIComponent(id)}`);
 export const createCommand = (data: {
   device_id: string;
   action: string;
@@ -278,3 +281,22 @@ export const listAuditEvents = () => request<IAuditEvent[]>("/audit");
 
 export const getSystemStatus = () => request<Record<string, string>>("/system/status");
 export const healthCheck = () => request<{ status: string }>("/health");
+
+export interface ScenarioDefinition {
+  id: string; name: string; source: string; outputs: string[]; groups: string[]; color: number[];
+}
+export interface ScenarioPlan {
+  id: string; device_id: string; scenario_id: string; name: string; duration_sec: number;
+  start_at: string; repeat: 'once' | 'daily'; enabled: boolean; next_at: string | null;
+}
+export interface ScenarioRun {
+  id: string; plan_id: string | null; device_id: string; scenario_id: string; duration_sec: number;
+  due_at: string; status: 'pending' | 'running' | 'stopping' | 'uncertain' | 'completed' | 'cancelled' | 'failed';
+  error_code: string; message: string; created_at: string; started_at: string | null; ends_at: string | null; finished_at: string | null;
+}
+export const listScenarioRuns = (device: string) => request<ScenarioRun[]>(`/scenario-runs?device_id=${encodeURIComponent(device)}`);
+export const startScenario = (device: string, scenario: string, duration: number) => request<ScenarioRun>('/scenario-runs', { method: 'POST', body: JSON.stringify({ device_id: device, scenario_id: scenario, duration_sec: duration }) });
+export const stopScenario = (device: string, id: string) => request<void>(`/scenario-runs/${id}/stop?device_id=${encodeURIComponent(device)}`, { method: 'POST' });
+export const listScenarioPlans = (device: string) => request<ScenarioPlan[]>(`/scenario-plans?device_id=${encodeURIComponent(device)}`);
+export const saveScenarioPlan = (plan: Omit<ScenarioPlan, 'next_at'>) => request<ScenarioPlan>(`/scenario-plans${plan.id ? `/${plan.id}` : ''}`, { method: plan.id ? 'PUT' : 'POST', body: JSON.stringify(plan) });
+export const deleteScenarioPlan = (device: string, id: string) => request<void>(`/scenario-plans/${id}?device_id=${encodeURIComponent(device)}`, { method: 'DELETE' });
